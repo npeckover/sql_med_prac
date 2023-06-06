@@ -1,0 +1,165 @@
+---
+title: "Medicare_Inpatient_Hospital_by_Geo_and_Service_2020"
+author: "Nick Peckover"
+date: "2023-05-09"
+output: html_document
+---
+
+The purpose of this project is to analyse data from CMS related to Medicare inpatient data, specifically related to geography. The data is sourced from [data.cms.gov](https://data.cms.gov/provider-summary-by-type-of-service/medicare-inpatient-hospitals/medicare-inpatient-hospitals-by-geography-and-service). The data dictionary is available [here](https://data.cms.gov/sites/default/files/2022-07/MUP_INP_RY22_20220722_DD_Geo.pdf). The data is already aggregated and summarized by CMS, and is hosted on a local database which will be accessed through R and SQL in order to build visualizations.
+
+Questions to answer with this dataset:
+
+-   Which states have the highest average Medicare payments?
+
+-   Which state has the highest number of discharges per capita?
+
+-   How do DRGs vary by state? Are certain conditions more common in certain geographic regions?
+
+```{r}
+# establish connection to DB
+con <- DBI::dbConnect(
+  RPostgres::Postgres(),
+  dbname = 'Medicare',
+  host = 'localhost',
+  port = 5432,
+  user = rstudioapi::askForPassword("Database user"),
+  password = rstudioapi::askForPassword("Database password")
+)
+```
+
+```{r}
+# load packages
+library(tidyverse)
+library(wesanderson)
+```
+
+Which states have the highest average Medicare payments?
+
+```{sql connection=con}
+SELECT 
+  prvdrgeodesc AS state,
+  AVG(avgmdcrpymt) AS amount
+FROM inpatienthospital2020
+WHERE prvdrgeodesc != 'National'
+GROUP BY prvdrgeodesc
+ORDER BY amount DESC
+```
+
+Which states have the highest number of discharges per 1,000 people (or 1,000 beneficiaries)? To answer these questions I have also gathered population estimates from the 2020 US Census.
+
+```{sql connection=con}
+SELECT
+  p.*,
+  p.benes / p.pop AS "prop benes",
+  SUM(i.totaldc) AS discharges,
+  (SUM(i.totaldc) * 1000) / p.benes AS "dc per 1000 benes",
+	(SUM(i.totaldc) * 1000) / p.pop AS "dc per 1000 pop"
+FROM population2020 p
+JOIN inpatienthospital2020 i
+ON i.prvdrgeodesc = p.state
+GROUP BY p.state, p.pop, p.benes
+ORDER BY 6 DESC
+```
+
+```{r}
+# get above query as a dataframe
+dat <- DBI::dbGetQuery(
+  con, 
+  "SELECT
+    p.*,
+    p.benes / p.pop AS prop,
+    SUM(i.totaldc) AS discharges,
+    (SUM(i.totaldc) * 1000) / p.benes AS dc1kbenes,
+	  (SUM(i.totaldc) * 1000) / p.pop AS dc1kpop
+  FROM population2020 p
+  JOIN inpatienthospital2020 i
+  ON i.prvdrgeodesc = p.state
+  GROUP BY p.state, p.pop, p.benes
+  ORDER BY 6 DESC"
+)
+```
+
+```{r}
+# save some pretty colors
+pal <- wes_palette("GrandBudapest2", 14, type = "continuous")
+
+# define custom theme
+theme_np_dark <- function() {
+  theme(
+    line = element_line(color = "#939393"),
+    rect = element_rect(fill = "#212121",
+                        linetype = 0, colour = NA),
+    text = element_text(color = "#dbdbdb", family = "sans"),
+    axis.title = element_text(color = "#dbdbdb", size = rel(1)),
+    axis.title.x = element_text(vjust = -2),
+    axis.title.y = element_text(vjust = 4),
+    axis.ticks = element_blank(),
+    axis.line = element_blank(),
+    axis.text.x = element_text(color = "#dbdbdb", size = rel(1.1)),
+    axis.text.y = element_text(color = "#dbdbdb", size = rel(1.1)),
+    legend.background = element_rect(fill = '#212121'),
+    legend.key = element_rect(color = NULL, fill = "#212121"),
+    legend.text = element_text(color = "#dbdbdb"),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    panel.background = element_rect(color = '#212121', fill = '#212121'),
+    panel.grid = element_line(color = NULL),
+    panel.grid.major.y = element_line(color = "#565656"),
+    panel.grid.minor.y = element_line(color = "#565656"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = rel(1.6)),
+    plot.subtitle = element_text(hjust = 0.5, size = rel(0.8)),
+    plot.caption = element_text(hjust = 1, size = rel(0.85)),
+    plot.margin = unit(c(1, 1, 1, 1), "lines")
+    )
+}
+```
+
+```{r}
+# create plot
+dat %>%
+  ggplot(aes(dc1kpop, 
+             dc1kbenes, 
+             size = prop,
+             color = prop)) + 
+  geom_point() +
+  scale_color_continuous(high = pal[10], 
+                         low = pal[14], 
+                         guide = "none") +
+  scale_size_continuous(range = c(1,4), guide = "none") +
+  annotate("text", x = 32, y = 258, 
+           label = "District of Columbia",
+           col = "#dbdbdb", size = rel(3)) +
+  annotate("text", x = 11, y = 72, 
+           label = "Hawaii",
+           col = "#dbdbdb", size = rel(3)) +
+  annotate("text", x = 36.2, y = 140, 
+           label = "West Virginia",
+           col = "#dbdbdb", size = rel(3)) +
+  theme_np_dark() +
+  labs(title = "State Population vs. Beneficiaries",
+       subtitle = "Bubble size relative to Medicare beneficiary population proportion",
+       y = "Discharges per 1000 Beneficiaries", 
+       x = "Discharges per 1000 Population")
+  
+```
+
+Population, the number of beneficiaries, and the number of discharges are all highly correlated with each other: in general, a state with a higher population will have more discharges. We can make inferences about a state's Medicare usage by instead looking at the number of discharges per 1000 beneficiaries as well as per 1000 population members. Establishing these values as rates removes the correlation between state size and number of discharges. The above plot shows that the correlation between these rates is still high, indicating that some states simply have higher usage no matter how you choose to measure it. DC is an outlier in the number of discharges per 1000 beneficiaries, with a rate of 266 per 1000.
+
+```{r}
+cor(dat$pop, dat$benes);
+cor(dat$pop, dat$discharges);
+cor(dat$pop, dat$dc1kpop); 
+cor(dat$pop, dat$dc1kbenes);
+cor(dat$dc1kbenes, dat$dc1kpop);
+cor(dat$dc1kpop, dat$prop);
+```
+
+```{r}
+lm <- lm(dc1kbenes ~ dc1kpop, data = dat)
+summary(lm)
+# or if just want the R2:
+cor(dat$dc1kbenes, dat$dc1kpop)^2
+```
